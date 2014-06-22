@@ -26,11 +26,12 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.apache.jmeter.testelement.TestStateListener;
-import org.eclipse.jetty.util.ssl.SslContextFactory;
-import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
-import org.eclipse.jetty.websocket.client.WebSocketClient;
+import org.glassfish.tyrus.client.ClientManager;
+
+import javax.websocket.Session;
 
 /**
  *
@@ -56,36 +57,29 @@ public class WebSocketSampler extends AbstractSampler implements TestStateListen
         setName("WebSocket sampler");
     }
 
-    private ServiceSocket getConnectionSocket() throws URISyntaxException, Exception {
-        URI uri = getUri();
+    private ServiceSocket getConnectionSocket() throws Exception {
 
         String connectionId = getThreadName() + getConnectionId();
-        ServiceSocket socket;
+        log.debug("Getting connection socket: " + connectionId);
 
-        //Create WebSocket client
-        SslContextFactory sslContexFactory = new SslContextFactory();
-        sslContexFactory.setTrustAll(isIgnoreSslErrors());
-        WebSocketClient webSocketClient = new WebSocketClient(sslContexFactory);        
-        
-        if (isStreamingConnection()) {
-             if (connectionList.containsKey(connectionId)) {
-                 socket = connectionList.get(connectionId);
-                 socket.initialize();
-                 return socket;
-             } else {
-                socket = new ServiceSocket(this, webSocketClient);
-                connectionList.put(connectionId, socket);
-             }
-        } else {
-            socket = new ServiceSocket(this, webSocketClient);
+        // Handle existing streaming connection
+        if (isStreamingConnection() && connectionList.containsKey(connectionId)) {
+            log.debug("Found existing streaming connection: " + connectionId);
+            ServiceSocket socket = connectionList.get(connectionId);
+            socket.initialize(this);
+            return socket;
         }
 
-        //Start WebSocket client thread and upgrage HTTP connection
-        webSocketClient.start();
-        ClientUpgradeRequest request = new ClientUpgradeRequest();
-        webSocketClient.connect(socket, uri, request);
-        
-        //Get connection timeout or use the default value
+        ServiceSocket socket = new ServiceSocket(this);
+        if (isStreamingConnection()) {
+            connectionList.put(connectionId, socket);
+        }
+
+        log.debug("Creating new socket and client");
+        ClientManager clientManager = ClientManager.createClient();
+        clientManager.asyncConnectToServer(socket, getUri());
+        log.debug("Started async connection to server: " + getUri());
+
         int connectionTimeout;
         try {
             connectionTimeout = Integer.parseInt(getConnectionTimeout());
@@ -93,10 +87,16 @@ public class WebSocketSampler extends AbstractSampler implements TestStateListen
             log.warn("Connection timeout is not a number; using the default connection timeout of " + DEFAULT_CONNECTION_TIMEOUT + "ms");
             connectionTimeout = DEFAULT_CONNECTION_TIMEOUT;
         }
-        
-        socket.awaitOpen(connectionTimeout, TimeUnit.MILLISECONDS);
-        
-        return socket;
+
+        log.debug("Waiting " + connectionTimeout + "ms for connection");
+        if (!socket.awaitOpen(connectionTimeout, TimeUnit.MILLISECONDS)) {
+            log.warn("Failed to connect");
+            return null;
+        }
+        else {
+            log.debug("Returning connection socket");
+            return socket;
+        }
     }
     
     @Override
@@ -149,12 +149,7 @@ public class WebSocketSampler extends AbstractSampler implements TestStateListen
             // - Response matching connection closing pattern is received
             // - Timeout is reached
             socket.awaitClose(responseTimeout, TimeUnit.MILLISECONDS);
-            
-            //If no response is received set code 204; actually not used...needs to do something else
-            if (socket.getResponseMessage() == null || socket.getResponseMessage().isEmpty()) {
-                sampleResult.setResponseCode("204");
-            }
-            
+
             //Set sampler response code
             if (socket.getError() != 0) {
                 isOK = false;
