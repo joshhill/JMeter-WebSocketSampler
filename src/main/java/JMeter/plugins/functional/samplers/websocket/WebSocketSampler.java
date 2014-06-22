@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import org.apache.jmeter.testelement.TestStateListener;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 
@@ -56,35 +57,31 @@ public class WebSocketSampler extends AbstractSampler implements TestStateListen
         setName("WebSocket sampler");
     }
 
-    private ServiceSocket getConnectionSocket() throws URISyntaxException, Exception {
-        URI uri = getUri();
+    private ServiceSocket getConnectionSocket() throws Exception {
 
         String connectionId = getThreadName() + getConnectionId();
-        ServiceSocket socket;
 
-        //Create WebSocket client
-        SslContextFactory sslContexFactory = new SslContextFactory();
-        sslContexFactory.setTrustAll(isIgnoreSslErrors());
-        WebSocketClient webSocketClient = new WebSocketClient(sslContexFactory);        
-        
-        if (isStreamingConnection()) {
-             if (connectionList.containsKey(connectionId)) {
-                 socket = connectionList.get(connectionId);
-                 socket.initialize();
-                 return socket;
-             } else {
-                socket = new ServiceSocket(this, webSocketClient);
-                connectionList.put(connectionId, socket);
-             }
-        } else {
-            socket = new ServiceSocket(this, webSocketClient);
+        // Handle existing streaming connection
+        if (isStreamingConnection() && connectionList.containsKey(connectionId)) {
+            ServiceSocket socket = connectionList.get(connectionId);
+            socket.initialize(this);
+            return socket;
         }
 
-        //Start WebSocket client thread and upgrage HTTP connection
+        SslContextFactory sslContextFactory = new SslContextFactory();
+        sslContextFactory.setTrustAll(isIgnoreSslErrors());
+
+        WebSocketClient webSocketClient = new WebSocketClient(sslContextFactory, new QueuedThreadPool(5, 1));
+        ServiceSocket socket = new ServiceSocket(this, webSocketClient);
+
+        if (isStreamingConnection()) {
+            connectionList.put(connectionId, socket);
+        }
+
+        //Start WebSocket client thread and upgrade HTTP connection
         webSocketClient.start();
-        ClientUpgradeRequest request = new ClientUpgradeRequest();
-        webSocketClient.connect(socket, uri, request);
-        
+        webSocketClient.connect(socket, getUri(), new ClientUpgradeRequest());
+
         //Get connection timeout or use the default value
         int connectionTimeout;
         try {
@@ -149,12 +146,7 @@ public class WebSocketSampler extends AbstractSampler implements TestStateListen
             // - Response matching connection closing pattern is received
             // - Timeout is reached
             socket.awaitClose(responseTimeout, TimeUnit.MILLISECONDS);
-            
-            //If no response is received set code 204; actually not used...needs to do something else
-            if (socket.getResponseMessage() == null || socket.getResponseMessage().isEmpty()) {
-                sampleResult.setResponseCode("204");
-            }
-            
+
             //Set sampler response code
             if (socket.getError() != 0) {
                 isOK = false;

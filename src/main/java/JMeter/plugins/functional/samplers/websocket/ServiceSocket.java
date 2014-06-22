@@ -5,6 +5,7 @@
 package JMeter.plugins.functional.samplers.websocket;
 
 import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -29,7 +30,7 @@ import org.eclipse.jetty.websocket.client.WebSocketClient;
 @WebSocket(maxTextMessageSize = 256 * 1024 * 1024)
 public class ServiceSocket {
 
-    protected final WebSocketSampler parent;
+    protected WebSocketSampler parent;
     protected WebSocketClient client;
     private static final Logger log = LoggingManager.getLoggerForClass();
     protected Deque<String> responeBacklog = new LinkedList<String>();
@@ -38,8 +39,6 @@ public class ServiceSocket {
     protected CountDownLatch openLatch = new CountDownLatch(1);
     protected CountDownLatch closeLatch = new CountDownLatch(1);
     protected Session session = null;
-    protected String responsePattern;
-    protected String disconnectPattern;
     protected int messageCounter = 1;
     protected Pattern responseExpression;
     protected Pattern disconnectExpression;
@@ -48,10 +47,7 @@ public class ServiceSocket {
     public ServiceSocket(WebSocketSampler parent, WebSocketClient client) {
         this.parent = parent;
         this.client = client;
-        
-        //Evaluate response matching patterns in case thay contain JMeter variables (i.e. ${var})
-        responsePattern = new CompoundVariable(parent.getResponsePattern()).execute();
-        disconnectPattern = new CompoundVariable(parent.getCloseConncectionPattern()).execute();
+
         logMessage.append("\n\n[Execution Flow]\n");
         logMessage.append(" - Opening new connection\n");
         initializePatterns();
@@ -68,7 +64,7 @@ public class ServiceSocket {
             if (responseExpression == null || responseExpression.matcher(msg).find()) {
                 logMessage.append("; matched response pattern").append("\n");
                 closeLatch.countDown();
-            } else if (!disconnectPattern.isEmpty() && disconnectExpression.matcher(msg).find()) {
+            } else if (disconnectExpression != null && disconnectExpression.matcher(msg).find()) {
                 logMessage.append("; matched connection close pattern").append("\n");
                 closeLatch.countDown();
                 close(StatusCode.NORMAL, "JMeter closed session.");
@@ -121,7 +117,11 @@ public class ServiceSocket {
 
     public boolean awaitClose(int duration, TimeUnit unit) throws InterruptedException {
         logMessage.append(" - Waiting for messages for ").append(duration).append(" ").append(unit.toString()).append("\n");
+
         boolean res = this.closeLatch.await(duration, unit);
+        if (!res) {
+            error = HttpURLConnection.HTTP_CLIENT_TIMEOUT;
+        }
 
         if (!parent.isStreamingConnection()) {
             close(StatusCode.NORMAL, "JMeter closed session.");
@@ -201,9 +201,14 @@ public class ServiceSocket {
     }
 
     protected void initializePatterns() {
+
+        //Evaluate response matching patterns in case thay contain JMeter variables (i.e. ${var})
+        String responsePattern = new CompoundVariable(parent.getResponsePattern()).execute();
+        String disconnectPattern = new CompoundVariable(parent.getCloseConncectionPattern()).execute();
+
         try {
             logMessage.append(" - Using response message pattern \"").append(responsePattern).append("\"\n");
-            responseExpression = (responsePattern != null || !responsePattern.isEmpty()) ? Pattern.compile(responsePattern) : null;
+            responseExpression = (responsePattern != null && !responsePattern.isEmpty()) ? Pattern.compile(responsePattern) : null;
         } catch (Exception ex) {
             logMessage.append(" - Invalid response message regular expression pattern: ").append(ex.getLocalizedMessage()).append("\n");
             log.error("Invalid response message regular expression pattern: " + ex.getLocalizedMessage());
@@ -212,7 +217,7 @@ public class ServiceSocket {
 
         try {
             logMessage.append(" - Using disconnect pattern \"").append(disconnectPattern).append("\"\n");
-            disconnectExpression = (disconnectPattern != null || !disconnectPattern.isEmpty()) ? Pattern.compile(disconnectPattern) : null;
+            disconnectExpression = (disconnectPattern != null && !disconnectPattern.isEmpty()) ? Pattern.compile(disconnectPattern) : null;
         } catch (Exception ex) {
             logMessage.append(" - Invalid disconnect regular expression pattern: ").append(ex.getLocalizedMessage()).append("\n");
             log.error("Invalid disconnect regular regular expression pattern: " + ex.getLocalizedMessage());
@@ -228,11 +233,15 @@ public class ServiceSocket {
         return connected;
     }
 
-    public void initialize() {
+    public void initialize(WebSocketSampler parent) {
+        this.parent = parent;
+
         logMessage = new StringBuffer();
         logMessage.append("\n\n[Execution Flow]\n");
         logMessage.append(" - Reusing exising connection\n");
         error = 0;
+
+        initializePatterns();
 
         this.closeLatch = new CountDownLatch(1);
     }
